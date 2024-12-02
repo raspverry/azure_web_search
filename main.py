@@ -9,21 +9,53 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # クローラーの設定
-CRAWLER_TYPE = os.getenv("CRAWLER_TYPE", "scrapy")  # デフォルトはscrapy
+CRAWLER_TYPE = os.getenv("CRAWLER_TYPE", "scrapy")
 CRAWLER_CONFIG = {
     "user_agent": "カスタムユーザーエージェント",
     "respect_robots": True,
-    "delay": 2
+    "delay": 2,
+    "api_url": "http://localhost:3002/v1/scrape",  # Firecrawl API URL
+    "timeout": 60,
 }
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_URL = "https://api.openai.com/v1/chat/completions"
 
-async def fetch_webpage_content(url: str) -> str:
+
+async def fetch_webpage_content(
+    url: str, semaphore: asyncio.Semaphore
+) -> tuple[str, str, str]:
     """ウェブページのコンテンツを取得"""
-    crawler = CrawlerFactory.create_crawler(CRAWLER_TYPE, CRAWLER_CONFIG)
-    try:
-        result = await crawler.fetch_content(url)
-        return result.content if not result.error else ""
-    finally:
-        crawler.cleanup()
+    async with semaphore:  # 同時接続数を制限
+        crawler = CrawlerFactory.create_crawler(CRAWLER_TYPE, CRAWLER_CONFIG)
+        try:
+            result = await crawler.fetch_content(url)
+            content = result.content if not result.error else ""
+            title = result.title if hasattr(result, "title") else ""
+            error = result.error if hasattr(result, "error") else ""
+            return content, title, error
+        finally:
+            await crawler.cleanup()  # awaitを追加
+
+
+async def process_urls(urls: list) -> list:
+    """URLリストを並列で処理"""
+    semaphore = asyncio.Semaphore(5)  # 同時に処理するURL数を制限
+    tasks = []
+
+    for i, url in enumerate(urls, 1):
+        print(f"\n[{i}/{len(urls)}] 取得中: {url}")
+        task = asyncio.create_task(fetch_webpage_content(url, semaphore))
+        tasks.append((url, task))
+
+    results = []
+    for url, task in tasks:
+        content, title, error = await task
+        if error:
+            print(f"エラー ({url}): {error}")
+        results.append(content)
+
+    return results
+
 
 async def main():
     """メイン関数"""
@@ -34,24 +66,29 @@ async def main():
         # Azure Web Search APIを呼び出す
         search_results = bing_web_search(user_query)
         web_pages = search_results.get("webPages", {}).get("value", [])
-        
+
         if not web_pages:
             print("検索結果が見つかりませんでした。")
             return
 
-        # 検索結果からURLを抽出し、ウェブページの内容を取得
-        detailed_summaries = []
-        for i, page in enumerate(web_pages, 1):
-            url = page.get("url")
-            print(f"\n[{i}/{len(web_pages)}] 取得中: {url}")
-            
-            content = await fetch_webpage_content(url)
-            detailed_summaries.append({
+        # URLリストを作成
+        urls = [page.get("url") for page in web_pages]
+
+        # 並列処理でコンテンツを取得
+        contents = await process_urls(urls)
+
+        # 検索結果とコンテンツを組み合わせる
+        detailed_summaries = [
+            {
                 "title": page.get("name"),
-                "url": url,
+                "url": page.get("url"),
                 "snippet": page.get("snippet"),
-                "content": content[:1000] if content else "コンテンツを取得できませんでした"
-            })
+                "content": content[:1000]
+                if content
+                else "コンテンツを取得できませんでした",
+            }
+            for page, content in zip(web_pages, contents)
+        ]
 
         # OpenAIのプロンプトを生成
         prompt = (
@@ -70,8 +107,10 @@ async def main():
         print("\nOpenAI GPTモデルに応答をリクエストしています...\n")
 
         # OpenAI GPT APIを呼び出す
-        ai_response = openai_generate_response(prompt)
-        
+        ai_response = openai_generate_response(
+            OPENAI_API_KEY=OPENAI_API_KEY, OPENAI_API_URL=OPENAI_API_URL, prompt=prompt
+        )
+
         # 応答を表示
         answer = ai_response["choices"][0]["message"]["content"]
         print("\n💡 **AI応答**\n")
@@ -79,6 +118,7 @@ async def main():
 
     except Exception as e:
         print(f"エラーが発生しました: {str(e)}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
