@@ -22,3 +22,5 @@ wheels/
 
 # Logs
 *.log
+
+cache/

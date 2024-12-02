@@ -11,7 +11,7 @@ Web検索機能を組み込んだRAG（Retrieval-Augmented Generation）の実�
 
 ## 前提条件
 
-- Python 3.8以上
+- Python 3.10以上
 - Azure Web Search APIのアクセスキー
 - OpenAI APIのアクセスキー
 - uvコマンド（パッケージマネージャー）
